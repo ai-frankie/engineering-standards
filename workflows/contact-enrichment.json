@@ -1,0 +1,148 @@
+{
+  "name": "Lead_Enrich_Contacts",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "documentId": { "__rl": true, "mode": "id", "value": "={{ $env.Lead_SHEETS_ID }}" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Contacts" },
+        "options": {}
+      },
+      "name": "Read Contacts",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter: Tier 1 + Tier 2 only, email not yet enriched, has a website\nreturn items.filter(item => {\n  const d = item.json;\n  const tier = Number(d.signal_tier);\n  const noEmail = !d.email || String(d.email).trim() === '';\n  const hasWebsite = d.website && String(d.website).trim() !== '';\n  return tier <= 2 && noEmail && hasWebsite;\n});\n"
+      },
+      "name": "Filter Tier 1+2 No Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract clean domain from website URL\nconst website = String(items[0].json.website || '').trim();\nlet domain = website\n  .replace(/^https?:\\/\\//i, '')\n  .replace(/^www\\./i, '')\n  .split('/')[0]\n  .split('?')[0]\n  .toLowerCase()\n  .trim();\n\nreturn [{ json: { ...items[0].json, domain } }];\n"
+      },
+      "name": "Extract Domain",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.hunter.io/v2/domain-search?domain={{ $json.domain }}&seniority=executive,senior&department=executive,management,operations&verification_status=valid&required_field=full_name&limit=3&api_key={{ $env.HUNTER_API_KEY }}",
+        "options": {}
+      },
+      "name": "Hunter Domain Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Hunter pre-filtered by seniority + department + verified — just pick #1\n// No custom scoring needed — Hunter already ranked them\nconst response = items[0].json;\nconst emails = response.data?.emails || [];\nconst domain = response.data?.domain || '';\nconst pattern = response.data?.pattern || '';\nconst company = $('Filter Tier 1+2 No Email').item.json.company;\nconst contact_id = $('Filter Tier 1+2 No Email').item.json.contact_id;\n\nif (emails.length === 0) {\n  return [{ json: { contact_id, company, domain, pattern, name: '', email: '', title: '', phone: '', confidence: 0, enriched: false, reason: 'no_senior_emails_found' } }];\n}\n\n// Take the first result — Hunter already filtered by executive/senior + operations/management\nconst top = emails[0];\nreturn [{ json: {\n  contact_id,\n  company,\n  domain,\n  pattern,\n  name: `${top.first_name || ''} ${top.last_name || ''}`.trim(),\n  email: top.value || '',\n  title: top.position || '',\n  phone: top.phone_number || '',\n  confidence: top.confidence || 0,\n  seniority: top.seniority || '',\n  department: top.department || '',\n  linkedin: top.linkedin || '',\n  enriched: true,\n  reason: 'hunter_pre_filtered'\n}}];\n"
+      },
+      "name": "Score + Pick Best Contact",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1440, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.enriched }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "name": "Has Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "mode": "id", "value": "={{ $env.Lead_SHEETS_ID }}" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Contacts" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "contact_id": "={{ $json.contact_id }}",
+            "name": "={{ $json.name }}",
+            "email": "={{ $json.email }}",
+            "phone": "",
+            "enriched_title": "={{ $json.title }}",
+            "enriched_source": "hunter.io",
+            "enriched_at": "={{ new Date().toISOString() }}"
+          },
+          "matchingColumns": ["contact_id"],
+          "schema": [
+            { "id": "contact_id", "displayName": "contact_id", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "name", "displayName": "name", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "email", "displayName": "email", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "phone", "displayName": "phone", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "enriched_title", "displayName": "enriched_title", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "enriched_source", "displayName": "enriched_source", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "enriched_at", "displayName": "enriched_at", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Write Enriched Contact",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1920, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log skipped contacts (no senior email found)\nconsole.log(`Skipped: ${items[0].json.company} — ${items[0].json.reason}`);\nreturn items;\n"
+      },
+      "name": "Log Skipped",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1920, 420]
+    },
+    {
+      "parameters": {
+        "jsCode": "const written = $('Write Enriched Contact').all().length;\nconst skipped = $('Log Skipped').all().length;\nconsole.log(`Enrichment complete. Written: ${written}, Skipped: ${skipped}`);\nreturn [{ json: { written, skipped, completed_at: new Date().toISOString() } }];\n"
+      },
+      "name": "Enrichment Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2160, 300]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": { "main": [[{ "node": "Read Contacts", "type": "main", "index": 0 }]] },
+    "Read Contacts": { "main": [[{ "node": "Filter Tier 1+2 No Email", "type": "main", "index": 0 }]] },
+    "Filter Tier 1+2 No Email": { "main": [[{ "node": "Extract Domain", "type": "main", "index": 0 }]] },
+    "Extract Domain": { "main": [[{ "node": "Hunter Domain Search", "type": "main", "index": 0 }]] },
+    "Hunter Domain Search": { "main": [[{ "node": "Score + Pick Best Contact", "type": "main", "index": 0 }]] },
+    "Score + Pick Best Contact": { "main": [[{ "node": "Has Email?", "type": "main", "index": 0 }]] },
+    "Has Email?": {
+      "main": [
+        [{ "node": "Write Enriched Contact", "type": "main", "index": 0 }],
+        [{ "node": "Log Skipped", "type": "main", "index": 0 }]
+      ]
+    },
+    "Write Enriched Contact": { "main": [[{ "node": "Enrichment Summary", "type": "main", "index": 0 }]] },
+    "Log Skipped": { "main": [[{ "node": "Enrichment Summary", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}

@@ -1,0 +1,155 @@
+{
+  "name": "Lead_Weekly_Refresh",
+  "nodes": [
+    {
+      "id": "manual-trigger",
+      "name": "When clicking 'Execute workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "parameters": {}
+    },
+    {
+      "id": "cron-trigger",
+      "name": "Weekly Cron (Sunday 3AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 480],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 3 * * 0"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "read-source_csv-import",
+      "name": "Read Source CSV Import",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [480, 380],
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Source CSV_Import"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "id": "normalize-rows",
+      "name": "Normalize Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 380],
+      "parameters": {
+        "jsCode": "// NormalizeRows: Map Source CSV Research Market CSV → Lead Contacts schema\n// Input: raw rows from Source CSV_Import tab (contact pastes new CSV here weekly)\n// Output: normalized contact records with signal_tier scoring\n//\n// DATA SOURCE: Source CSV 'Research Market' report\n// Columns: Type, Research Market Name, Property Type, Search Type,\n//          Company Name, Company Industry, Company City, Company State,\n//          Company Website, Total Views-30days, Search Impression Views - 30days, Detail Page\n//\n// SIGNAL LOGIC:\n//   Detail Page views = company clicked INTO specific listings (strongest intent)\n//   Tier 1 (hot):    >= 10 detail page views\n//   Tier 2 (active): 3-9 detail page views\n//   Tier 3 (cold):   < 3 detail page views (impressions only)\n\nreturn items\n  .filter(item => item.json['Company Name'] && String(item.json['Company Name']).trim())\n  .map(item => {\n    const r = item.json;\n\n    // Parse view counts — handle numbers formatted with commas\n    const detailViews = parseInt(String(r['Detail Page'] || r['Detail Page Views'] || '0').replace(/,/g, '')) || 0;\n    const totalViews  = parseInt(String(r['Total Views-30days'] || r['Total Views'] || '0').replace(/,/g, '')) || 0;\n\n    // Score by detail page views (clicked into listing = real intent)\n    let signal_tier, why_now;\n    if (detailViews >= 10) {\n      signal_tier = 1;\n      why_now = `High intent — read ${detailViews} listings in past 30 days`;\n    } else if (detailViews >= 3) {\n      signal_tier = 2;\n      why_now = `Active search — viewed ${detailViews} detail pages`;\n    } else {\n      signal_tier = 3;\n      why_now = `Low engagement — ${totalViews} impressions, ${detailViews} detail views`;\n    }\n\n    // Stable contact_id: company + search type (Sale vs Lease = different record)\n    const contact_id = `${r['Company Name']}_${r['Type'] || 'unknown'}`\n      .toLowerCase()\n      .replace(/\\s+/g, '_')\n      .replace(/[^a-z0-9_]/g, '')\n      .substring(0, 64);\n\n    const searchType = String(r['Type'] || '').trim();\n\n    return {\n      json: {\n        contact_id,\n        company:              String(r['Company Name'] || '').trim(),\n        industry:             String(r['Company Industry'] || '').trim(),\n        city:                 String(r['Company City'] || '').trim(),\n        state:                String(r['Company State'] || '').trim(),\n        website:              String(r['Company Website'] || '').trim(),\n        search_type:          searchType,\n        asset_interest:       String(r['Property Type'] || '').trim(),\n        market:               String(r['Research Market Name'] || 'Los Angeles').trim(),\n        detail_views:         detailViews,\n        total_views:          totalViews,\n        signal_tier,\n        why_now,\n        role:                 searchType.toLowerCase() === 'sale' ? 'buyer_prospect' : 'tenant_prospect',\n        name:                 '',\n        email:                '',\n        phone:                '',\n        status:               'never_contacted',\n        last_contact_date:    '',\n        sequence_step:        0,\n        next_follow_up_date:  '',\n        source:               'source_csv_research_report',\n        source_date:          new Date().toISOString().split('T')[0],\n        created_at:           new Date().toISOString()\n      }\n    };\n  });\n"
+      }
+    },
+    {
+      "id": "upsert-contacts",
+      "name": "Upsert Contacts",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [960, 380],
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Contacts"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "contact_id":           "={{ $json.contact_id }}",
+            "company":              "={{ $json.company }}",
+            "industry":             "={{ $json.industry }}",
+            "city":                 "={{ $json.city }}",
+            "state":                "={{ $json.state }}",
+            "website":              "={{ $json.website }}",
+            "search_type":          "={{ $json.search_type }}",
+            "asset_interest":       "={{ $json.asset_interest }}",
+            "market":               "={{ $json.market }}",
+            "detail_views":         "={{ $json.detail_views }}",
+            "total_views":          "={{ $json.total_views }}",
+            "signal_tier":          "={{ $json.signal_tier }}",
+            "why_now":              "={{ $json.why_now }}",
+            "role":                 "={{ $json.role }}",
+            "name":                 "={{ $json.name }}",
+            "email":                "={{ $json.email }}",
+            "phone":                "={{ $json.phone }}",
+            "status":               "={{ $json.status }}",
+            "last_contact_date":    "={{ $json.last_contact_date }}",
+            "sequence_step":        "={{ $json.sequence_step }}",
+            "next_follow_up_date":  "={{ $json.next_follow_up_date }}",
+            "source":               "={{ $json.source }}",
+            "source_date":          "={{ $json.source_date }}",
+            "created_at":           "={{ $json.created_at }}"
+          },
+          "matchingColumns": ["contact_id"]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "id": "build-summary",
+      "name": "Build Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 380],
+      "parameters": {
+        "jsCode": "const allRows = $('Upsert Contacts').all();\n\nconst tier1   = allRows.filter(r => Number(r.json.signal_tier) === 1).length;\nconst tier2   = allRows.filter(r => Number(r.json.signal_tier) === 2).length;\nconst tier3   = allRows.filter(r => Number(r.json.signal_tier) === 3).length;\nconst buyers  = allRows.filter(r => r.json.role === 'buyer_prospect').length;\nconst tenants = allRows.filter(r => r.json.role === 'tenant_prospect').length;\n\nconst topTier1 = allRows\n  .filter(r => Number(r.json.signal_tier) === 1)\n  .sort((a, b) => Number(b.json.detail_views) - Number(a.json.detail_views))\n  .slice(0, 5)\n  .map(r => `${r.json.company} (${r.json.detail_views} detail views — ${r.json.role})`);\n\nconst summary = {\n  total_processed: allRows.length,\n  tier_1_hot:      tier1,\n  tier_2_active:   tier2,\n  tier_3_cold:     tier3,\n  buyers,\n  tenants,\n  top_5_tier1:     topTier1,\n  source_date:     allRows[0]?.json?.source_date || '',\n  completed_at:    new Date().toISOString()\n};\n\nconsole.log('Lead_Weekly_Refresh complete:', JSON.stringify(summary, null, 2));\nreturn [{ json: { success: true, summary } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When clicking 'Execute workflow'": {
+      "main": [[{ "node": "Read Source CSV Import", "type": "main", "index": 0 }]]
+    },
+    "Weekly Cron (Sunday 3AM)": {
+      "main": [[{ "node": "Read Source CSV Import", "type": "main", "index": 0 }]]
+    },
+    "Read Source CSV Import": {
+      "main": [[{ "node": "Normalize Rows", "type": "main", "index": 0 }]]
+    },
+    "Normalize Rows": {
+      "main": [[{ "node": "Upsert Contacts", "type": "main", "index": 0 }]]
+    },
+    "Upsert Contacts": {
+      "main": [[{ "node": "Build Summary", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  }
+}

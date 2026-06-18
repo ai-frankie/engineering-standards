@@ -1,0 +1,109 @@
+{
+  "name": "Lead_Daily_CallSheet",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-node",
+      "name": "Generate Call Sheet",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": {
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Contacts"
+        },
+        "filtersUI": {},
+        "options": {}
+      },
+      "id": "read-contacts-node",
+      "name": "Read Contacts",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const d = item.json;\n\n  // Only include enriched contacts\n  if (d.enrichment_status !== 'enriched') continue;\n\n  // Only Tier 1 and 2\n  const tier = parseInt(d.signal_tier) || 0;\n  if (tier < 1 || tier > 2) continue;\n\n  results.push({\n    json: {\n      signal_tier: tier,\n      company: d.company || '',\n      why_now: d.why_now || '',\n      contact1_name: d.contact1_name || '',\n      contact1_title: d.contact1_title || '',\n      contact1_email: d.contact1_email || '',\n      contact1_linkedin: d.contact1_linkedin || '',\n      contact2_name: d.contact2_name || '',\n      contact2_title: d.contact2_title || '',\n      contact2_email: d.contact2_email || '',\n      contact2_linkedin: d.contact2_linkedin || '',\n      contact3_name: d.contact3_name || '',\n      contact3_title: d.contact3_title || '',\n      contact3_email: d.contact3_email || '',\n      contact3_linkedin: d.contact3_linkedin || ''\n    }\n  });\n}\n\n// Sort: Tier 1 first, then Tier 2\nresults.sort((a, b) => a.json.signal_tier - b.json.signal_tier);\n\nreturn results;"
+      },
+      "id": "format-callsheet-node",
+      "name": "Format Call Sheet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "clear",
+        "documentId": {
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "CallSheet"
+        },
+        "clearType": "sheet",
+        "options": {}
+      },
+      "id": "clear-callsheet-node",
+      "name": "Clear CallSheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "CallSheet"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "headerRow": true
+        }
+      },
+      "id": "write-callsheet-node",
+      "name": "Write to CallSheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1120, 300]
+    }
+  ],
+  "connections": {
+    "Generate Call Sheet": {
+      "main": [[{"node": "Read Contacts", "type": "main", "index": 0}]]
+    },
+    "Read Contacts": {
+      "main": [[{"node": "Format Call Sheet", "type": "main", "index": 0}]]
+    },
+    "Format Call Sheet": {
+      "main": [[{"node": "Clear CallSheet", "type": "main", "index": 0}]]
+    },
+    "Clear CallSheet": {
+      "main": [[{"node": "Write to CallSheet", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

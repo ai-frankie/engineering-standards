@@ -12,6 +12,7 @@ How I run a high-velocity engineering practice with AI agents *without* sacrific
 - **[decision-discipline.md](decision-discipline.md)** — how every system change is logged ADR-style, with what changed, why, and the constraint it created.
 - **[skill-library.md](skill-library.md)** — taxonomy for organizing a 100+ reusable-skill library so the right capability is found in seconds, not rebuilt.
 - **[agent-coordination.md](agent-coordination.md)** — SendMessage-first multi-agent patterns (pipeline, fan-out, supervisor) for coordinated teams of named agents.
+- **[workflows/](workflows/)** — four production n8n automation workflows (genericized): a scheduled, idempotent contact-enrichment pipeline (Google Sheets ETL + Hunter.io API + dedup/upsert). The discipline above, applied to real ops automation.
 
 ## Operating principles (the short version)
 

@@ -1,0 +1,252 @@
+{
+  "name": "Lead_Hunter_Enrich",
+  "nodes": [
+    {
+      "id": "manual-trigger",
+      "name": "Run Enrichment",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "parameters": {}
+    },
+    {
+      "id": "read-contacts",
+      "name": "Read Contacts Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [480, 300],
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Contacts"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "id": "filter-tier-1-2",
+      "name": "Filter Tier 1 & 2 (No Email Yet)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300],
+      "parameters": {
+        "jsCode": "// Only process Tier 1 + Tier 2 contacts that:\n//  - have a website (needed for Hunter domain search)\n//  - don't already have an email (avoid re-burning API credits)\nconst filtered = items.filter(item => {\n  const tier = parseInt(item.json.signal_tier) || 3;\n  const email = String(item.json.email || '').trim();\n  const website = String(item.json.website || '').trim();\n  return tier <= 2 && email === '' && website !== '';\n});\n\nif (filtered.length === 0) {\n  return [{ json: { __skip: true, message: 'No Tier 1/2 contacts without emails found.' } }];\n}\n\nreturn filtered;\n"
+      }
+    },
+    {
+      "id": "skip-check",
+      "name": "Skip If Nothing To Enrich",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [960, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false },
+          "conditions": [
+            {
+              "id": "skip-flag",
+              "leftValue": "={{ $json.__skip }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "notTrue" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "batch-contacts",
+      "name": "Process One At A Time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1200, 220],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "extract-domain",
+      "name": "Extract Domain",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1440, 220],
+      "parameters": {
+        "jsCode": "// Extract clean domain from website URL\n// e.g. 'https://www.acme.com/about' → 'acme.com'\nconst item = items[0];\nconst raw = String(item.json.website || '').trim();\n\nlet domain = raw\n  .replace(/^https?:\\/\\//i, '')\n  .replace(/^www\\./i, '')\n  .split('/')[0]\n  .split('?')[0]\n  .toLowerCase()\n  .trim();\n\nreturn [{ json: { ...item.json, hunter_domain: domain } }];\n"
+      }
+    },
+    {
+      "id": "hunter-domain-search",
+      "name": "Hunter Domain Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 220],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.hunter.io/v2/domain-search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "domain", "value": "={{ $json.hunter_domain }}" },
+            { "name": "seniority", "value": "executive,senior" },
+            { "name": "department", "value": "executive,management,operations" },
+            { "name": "limit", "value": "5" },
+            { "name": "api_key", "value": "={{ $env.HUNTER_API_KEY }}" }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "pick-best-contact",
+      "name": "Pick Best Contact",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1920, 220],
+      "parameters": {
+        "jsCode": "// Hunter returns multiple emails — pick highest confidence result\nconst body = items[0].json;\n\nif (!body.data || !body.data.emails || body.data.emails.length === 0) {\n  return [{\n    json: {\n      hunter_email: '',\n      hunter_name: '',\n      hunter_title: '',\n      hunter_confidence: 0,\n      hunter_status: 'no_contacts_found',\n      enriched_at: new Date().toISOString()\n    }\n  }];\n}\n\nconst emails = body.data.emails.slice().sort((a, b) => (b.confidence || 0) - (a.confidence || 0));\nconst best = emails[0];\nconst fullName = [best.first_name, best.last_name].filter(Boolean).join(' ');\n\nreturn [{\n  json: {\n    hunter_email:      best.value || '',\n    hunter_name:       fullName,\n    hunter_title:      best.position || '',\n    hunter_confidence: best.confidence || 0,\n    hunter_status:     'found',\n    enriched_at:       new Date().toISOString()\n  }\n}];\n"
+      }
+    },
+    {
+      "id": "merge-with-original",
+      "name": "Merge Enrichment With Contact",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2160, 220],
+      "parameters": {
+        "jsCode": "// Re-attach original contact fields (contact_id, company, etc.) from Extract Domain node\nconst original = $('Extract Domain').item.json;\nconst enrichment = items[0].json;\n\nreturn [{\n  json: {\n    ...original,\n    name:              enrichment.hunter_name  || original.name  || '',\n    email:             enrichment.hunter_email || original.email || '',\n    title:             enrichment.hunter_title || original.title || '',\n    hunter_confidence: enrichment.hunter_confidence || 0,\n    hunter_status:     enrichment.hunter_status || 'error',\n    enriched_at:       enrichment.enriched_at || new Date().toISOString()\n  }\n}];\n"
+      }
+    },
+    {
+      "id": "update-contact-row",
+      "name": "Update Contact Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2400, 220],
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Contacts"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "name":              "={{ $json.name }}",
+            "email":             "={{ $json.email }}",
+            "title":             "={{ $json.title }}",
+            "hunter_confidence": "={{ $json.hunter_confidence }}",
+            "hunter_status":     "={{ $json.hunter_status }}",
+            "enriched_at":       "={{ $json.enriched_at }}"
+          },
+          "matchingColumns": ["contact_id"],
+          "schema": [
+            { "id": "contact_id",        "displayName": "contact_id",        "required": true,  "defaultMatch": true,  "canBeUsedToMatch": true },
+            { "id": "name",              "displayName": "name",              "required": false, "defaultMatch": false, "canBeUsedToMatch": false },
+            { "id": "email",             "displayName": "email",             "required": false, "defaultMatch": false, "canBeUsedToMatch": false },
+            { "id": "title",             "displayName": "title",             "required": false, "defaultMatch": false, "canBeUsedToMatch": false },
+            { "id": "hunter_confidence", "displayName": "hunter_confidence", "required": false, "defaultMatch": false, "canBeUsedToMatch": false },
+            { "id": "hunter_status",     "displayName": "hunter_status",     "required": false, "defaultMatch": false, "canBeUsedToMatch": false },
+            { "id": "enriched_at",       "displayName": "enriched_at",       "required": false, "defaultMatch": false, "canBeUsedToMatch": false }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "id": "loop-back",
+      "name": "Back To Batch",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2640, 220],
+      "parameters": {}
+    },
+    {
+      "id": "done",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1200, 400],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Run Enrichment": {
+      "main": [[{ "node": "Read Contacts Sheet", "type": "main", "index": 0 }]]
+    },
+    "Read Contacts Sheet": {
+      "main": [[{ "node": "Filter Tier 1 & 2 (No Email Yet)", "type": "main", "index": 0 }]]
+    },
+    "Filter Tier 1 & 2 (No Email Yet)": {
+      "main": [[{ "node": "Skip If Nothing To Enrich", "type": "main", "index": 0 }]]
+    },
+    "Skip If Nothing To Enrich": {
+      "main": [
+        [{ "node": "Process One At A Time", "type": "main", "index": 0 }],
+        [{ "node": "Done", "type": "main", "index": 0 }]
+      ]
+    },
+    "Process One At A Time": {
+      "main": [
+        [{ "node": "Extract Domain", "type": "main", "index": 0 }],
+        [{ "node": "Done", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract Domain": {
+      "main": [[{ "node": "Hunter Domain Search", "type": "main", "index": 0 }]]
+    },
+    "Hunter Domain Search": {
+      "main": [[{ "node": "Pick Best Contact", "type": "main", "index": 0 }]]
+    },
+    "Pick Best Contact": {
+      "main": [[{ "node": "Merge Enrichment With Contact", "type": "main", "index": 0 }]]
+    },
+    "Merge Enrichment With Contact": {
+      "main": [[{ "node": "Update Contact Row", "type": "main", "index": 0 }]]
+    },
+    "Update Contact Row": {
+      "main": [[{ "node": "Back To Batch", "type": "main", "index": 0 }]]
+    },
+    "Back To Batch": {
+      "main": [[{ "node": "Process One At A Time", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": ["cre", "enrichment", "hunter"],
+  "triggerCount": 1,
+  "updatedAt": "2026-03-27T00:00:00.000Z",
+  "versionId": "1"
+}
